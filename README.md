@@ -135,12 +135,25 @@ If you installed PocketPaw using:
 ```powershell
 pip install pocketpaw
 ```
+**Common Windows Issue**
 
-and the `pocketpaw` command is not recognized:
+After installing PocketPaw using `pip install pocketpaw`, some Windows users may see:
 
-```text
-'pocketpaw' is not recognized as an internal or external command
 ```
+'pocketpaw' is not recognized as the name of a cmdlet
+```
+
+This usually happens because the Python **Scripts directory is not included in the system PATH**.
+
+You can still run PocketPaw using:
+
+```powershell
+python -m pocketpaw
+```
+
+If this works, it confirms that the issue is related to the PATH configuration.
+
+
 
 This usually means your Python Scripts directory is not added to PATH.
 
