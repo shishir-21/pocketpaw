@@ -4,6 +4,8 @@
 # Updated: 2026-02-07 - Configurable providers, auto-learn, semantic context - Memory System
 # Updated: 2026-02-11 - Sender-scoped memory isolation
 
+# Import vector memory backend
+from pocketpaw.memory.vector.vector_memory import VectorMemory
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -34,7 +36,7 @@ def create_memory_store(
     Factory function to create the appropriate memory store.
 
     Args:
-        backend: Backend type - 'file' or 'mem0'
+        backend: Backend type - 'file', 'mem0' or 'vector' 
         base_path: Base path for storage
         user_id: User ID for mem0 scoping
         use_inference: Whether to use LLM inference (mem0 only)
@@ -48,7 +50,15 @@ def create_memory_store(
     Returns:
         MemoryStoreProtocol implementation
     """
-    if backend == "mem0":
+   # Vector memory backend using adapter pattern
+    if backend == "vector":
+        logger.info("Using vector memory backend (semantic search enabled)")
+        return VectorMemory(
+            user_id=user_id,
+            data_path=base_path,
+    )
+    # Mem0 backend
+    elif backend == "mem0":
         try:
             # Check if mem0 is actually available before creating store
             import importlib.util

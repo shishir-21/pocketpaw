@@ -65,6 +65,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # --- Feature extras ---
+vector = [
+    # Vector database used by the adapter-based vector memory backend
+    # Enables semantic search across stored user memories.
+    "chromadb>=0.5.0",
+]
 dashboard = [
     # Kept for backward compat — dashboard deps are now in core.
     # Users with `pip install pocketpaw[dashboard]` in scripts won't break.
