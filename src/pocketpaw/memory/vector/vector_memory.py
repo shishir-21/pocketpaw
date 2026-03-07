@@ -7,23 +7,25 @@ Implements MemoryStoreProtocol so it integrates with MemoryManager.
 import hashlib
 from pathlib import Path
 
-from pocketpaw.memory.protocol import MemoryEntry, MemoryStoreProtocol, MemoryType
-from pocketpaw.vectordb.chroma_adapter import ChromaAdapter
+from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 
 
-class VectorMemory(MemoryStoreProtocol):
+class VectorMemory:
     """
     Vector-based memory backend using a vector database adapter.
     """
 
     def __init__(self, user_id: str = "default", data_path: Path | None = None):
+
         self.user_id = user_id
         self.data_path = data_path
 
-        # simple session memory store
+        # NOTE: session history currently stored in memory only
         self.sessions: dict[str, list[MemoryEntry]] = {}
 
-        # initialize vector adapter
+        # Lazy import adapter
+        from pocketpaw.vectordb.chroma_adapter import ChromaAdapter
+
         db_path = data_path or (Path.home() / ".pocketpaw" / "vector_memory")
         self.adapter = ChromaAdapter(db_path)
 
@@ -39,10 +41,8 @@ class VectorMemory(MemoryStoreProtocol):
         """
         entry_id = self._generate_id(entry.content)
 
-        # store in vector db
         await self.adapter.add(entry.content, entry_id)
 
-        # optional session storage
         if entry.session_key:
             self.sessions.setdefault(entry.session_key, []).append(entry)
 
@@ -50,38 +50,37 @@ class VectorMemory(MemoryStoreProtocol):
 
     async def get(self, entry_id: str) -> MemoryEntry | None:
         """
-        Retrieve memory by ID (approximate via vector search).
+        Retrieve memory by ID.
         """
-        results = await self.adapter.search(entry_id, limit=1)
 
-        if not results:
+        text = await self.adapter.get_by_id(entry_id)
+
+        if not text:
             return None
 
         return MemoryEntry(
             id=entry_id,
-            content=results[0],
+            content=text,
             type=MemoryType.LONG_TERM,
         )
 
     async def delete(self, entry_id: str) -> bool:
         """
-        Delete memory entry from vector database.
+        Delete memory entry.
         """
-        try:
-            return await self.adapter.delete(entry_id)
-        except Exception:
-            return False
+        return await self.adapter.delete(entry_id)
 
     async def search(
         self,
         query: str | None = None,
         memory_type: MemoryType | None = None,
         tags=None,
-        limit: int = 5,
+        limit: int = 10,
     ):
         """
         Semantic search using vector similarity.
         """
+
         docs = await self.adapter.search(query or "", limit=limit)
 
         return [
@@ -96,22 +95,15 @@ class VectorMemory(MemoryStoreProtocol):
     async def get_by_type(
         self,
         memory_type: MemoryType,
-        limit: int = 50,
+        limit: int = 100,
         user_id=None,
     ):
         """
         Retrieve memories filtered by type.
-        """
-        docs = await self.adapter.search("", limit=limit)
 
-        return [
-            MemoryEntry(
-                id=self._generate_id(text),
-                content=text,
-                type=memory_type,
-            )
-            for text in docs
-        ]
+        NOTE: vector backend currently does not support filtering by type.
+        """
+        return []
 
     async def get_session(self, session_key: str):
         """
@@ -126,4 +118,3 @@ class VectorMemory(MemoryStoreProtocol):
         count = len(self.sessions.get(session_key, []))
         self.sessions[session_key] = []
         return count
-    

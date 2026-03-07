@@ -19,9 +19,15 @@ class VectorStoreProtocol(Protocol):
         """
         ...
 
-    async def search(self, query: str, limit: int = 5) -> list[str]:
+    async def search(self, query: str, limit: int = 10) -> list[str]:
         """
         Return the most similar stored texts.
+        """
+        ...
+
+    async def get_by_id(self, id: str) -> str | None:
+        """
+        Retrieve a stored entry by its exact ID.
         """
         ...
 

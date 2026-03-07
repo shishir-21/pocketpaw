@@ -5,21 +5,27 @@ This adapter connects PocketPaw's vector database layer to ChromaDB
 while following the VectorStoreProtocol interface.
 """
 
-import chromadb
-
-from pocketpaw.vectordb.protocol import VectorStoreProtocol
+import asyncio
 
 
-class ChromaAdapter(VectorStoreProtocol):
+class ChromaAdapter:
     """
     Adapter class for ChromaDB.
     """
 
     def __init__(self, data_path):
-        # Initialize persistent ChromaDB client
+
+        try:
+            import chromadb
+        except ImportError:
+            raise ImportError(
+                "ChromaDB is not installed. Install with: pip install pocketpaw[vector]"
+            )
+
+        # Initialize persistent client
         self.client = chromadb.PersistentClient(path=str(data_path))
 
-        # Create or get collection
+        # Create collection
         self.collection = self.client.get_or_create_collection(
             name="pocketpaw_memory"
         )
@@ -28,28 +34,50 @@ class ChromaAdapter(VectorStoreProtocol):
         """
         Store text in the vector database.
         """
-        self.collection.add(
+
+        await asyncio.to_thread(
+            self.collection.add,
             documents=[text],
             ids=[id],
         )
 
-    async def search(self, query: str, limit: int = 5) -> list[str]:
+    async def search(self, query: str, limit: int = 10) -> list[str]:
         """
         Search for similar memories.
         """
-        results = self.collection.query(
+
+        results = await asyncio.to_thread(
+            self.collection.query,
             query_texts=[query],
             n_results=limit,
         )
 
         return results.get("documents", [[]])[0]
 
+    async def get_by_id(self, id: str):
+
+        results = await asyncio.to_thread(
+            self.collection.get,
+            ids=[id],
+        )
+
+        docs = results.get("documents", [])
+
+        if not docs:
+            return None
+
+        return docs[0]
+
     async def delete(self, id: str) -> bool:
         """
         Delete a stored vector entry.
         """
+
         try:
-            self.collection.delete(ids=[id])
+            await asyncio.to_thread(
+                self.collection.delete,
+                ids=[id],
+            )
             return True
         except Exception:
             return False
