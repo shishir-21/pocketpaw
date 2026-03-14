@@ -10,8 +10,8 @@ PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_mem
 import asyncio
 import logging
 import re
-from pathlib import Path
 import time
+from pathlib import Path
 
 from pocketpaw.agents.router import AgentRouter
 from pocketpaw.bootstrap import AgentContextBuilder
@@ -672,10 +672,7 @@ class AgentLoop:
             # 4b. Auto-TTS: if the inbound message was a voice note and the agent
             # didn't already call text_to_speech (no audio in media_paths), synthesize
             # the full response as a voice reply now.
-            already_has_audio = any(
-                Path(p).suffix.lower() in {".mp3", ".wav", ".ogg", ".m4a"}
-                for p in media_paths
-            )
+            already_has_audio = any(Path(p).suffix.lower() in _AUDIO_EXTS for p in media_paths)
             if (
                 is_voice_message
                 and not already_has_audio

@@ -1,7 +1,7 @@
 # Tests for tools/builtin/voice.py
 # Created: 2026-02-07
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from pocketpaw.tools.builtin.voice import TextToSpeechTool, _get_audio_dir
 
@@ -201,6 +201,21 @@ async def test_synthesize_speech_returns_none_on_error(tmp_path):
     mock_settings.elevenlabs_api_key = None  # Missing key triggers error
 
     with patch("pocketpaw.tools.builtin.voice.get_settings", return_value=mock_settings):
+        result = await synthesize_speech("Test")
+
+    assert result is None
+
+
+async def test_synthesize_speech_checks_execute_error_result():
+    """Test synthesize_speech returns None when execute() returns an error string."""
+    from pocketpaw.tools.builtin.voice import synthesize_speech
+
+    with patch("pocketpaw.tools.builtin.voice.TextToSpeechTool") as mock_tool_cls:
+        mock_tool = MagicMock()
+        mock_tool.execute = AsyncMock(return_value="Error: provider unavailable")
+        mock_tool._last_generated_path = "/tmp/tts_should_not_be_used.mp3"
+        mock_tool_cls.return_value = mock_tool
+
         result = await synthesize_speech("Test")
 
     assert result is None

@@ -24,12 +24,15 @@ def _get_audio_dir() -> Path:
 
 async def synthesize_speech(text: str) -> str | None:
     """Standalone helper: synthesize text to an audio file using the configured TTS provider.
-
+ 
     Returns the output file path on success, or None on failure.
     Designed for use by the agent loop (auto-TTS for voice replies).
     """
     tool = TextToSpeechTool()
-    await tool.execute(text=text)
+    result = await tool.execute(text=text)
+    if result.startswith("Error:"):
+        logger.error("synthesize_speech failed: %s", result)
+        return None
     return tool._last_generated_path
 
 
@@ -135,7 +138,7 @@ class TextToSpeechTool(BaseTool):
         """Generate speech using ElevenLabs API."""
         settings = get_settings()
         api_key = settings.elevenlabs_api_key
-        voice = "pNInz6obpgDQGcFmaJgB"
+        voice = voice or "pNInz6obpgDQGcFmaJgB"
         if not api_key:
             return self._error(
                 "ElevenLabs API key not configured. Set POCKETPAW_ELEVENLABS_API_KEY."
@@ -167,7 +170,7 @@ class TextToSpeechTool(BaseTool):
             return self._media_result(str(output_path))
 
         except httpx.HTTPStatusError as e:
-            logger.error("ElevenLabs TTS error: %s", e.response.status_code)
+            logger.error("ElevenLabs TTS error: %s", e)
             return self._error(f"ElevenLabs TTS error: {e.response.status_code}")
         except Exception as e:
             return self._error(f"ElevenLabs TTS failed: {e}")

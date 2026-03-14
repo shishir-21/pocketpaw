@@ -5,7 +5,6 @@ Created: 2026-02-02
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Any
 
 try:
@@ -50,6 +49,7 @@ class TelegramAdapter(BaseChannelAdapter):
         self.app: Application | None = None
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing refresh task
         self._buffers: dict[str, Any] = {}
+        self._voice_media_hints: dict[tuple[str, str], bool] = {}
 
     @property
     def channel(self) -> Channel:
@@ -180,6 +180,10 @@ class TelegramAdapter(BaseChannelAdapter):
                 await self._flush_stream_buffer(message.chat_id)
                 # Send any attached media files
                 for path in message.media or []:
+                    hint_key = (message.chat_id, path)
+                    self._voice_media_hints[hint_key] = self._is_voice_media(
+                        path, message.metadata
+                    )
                     await self._send_media_file(message.chat_id, path)
                 return
 
@@ -297,6 +301,26 @@ class TelegramAdapter(BaseChannelAdapter):
 
     # --- Media sending ---
 
+    @staticmethod
+    def _is_voice_media(file_path: str, metadata: dict[str, Any] | None) -> bool:
+        """Determine whether an audio file should be sent as a Telegram voice note.
+
+        Preferred metadata shape:
+        - ``{"is_voice": true}`` to mark all audio files as voice notes
+        - ``{"voice_media_paths": ["/abs/path/file.mp3", ...]}`` for per-file control
+        """
+        if not metadata:
+            return False
+
+        if bool(metadata.get("is_voice")):
+            return True
+
+        voice_paths = metadata.get("voice_media_paths")
+        if isinstance(voice_paths, list):
+            return file_path in voice_paths
+
+        return False
+
     async def _send_media_file(self, chat_id: str, file_path: str) -> None:
         """Send a media file (audio/image/document) to a Telegram chat."""
         import os
@@ -307,6 +331,7 @@ class TelegramAdapter(BaseChannelAdapter):
         from pocketpaw.bus.adapters import guess_media_type
 
         media_type = guess_media_type(file_path)
+        is_voice = self._voice_media_hints.pop((chat_id, file_path), False)
         real_chat_id, topic_id = self._parse_chat_id(chat_id)
         kwargs: dict[str, Any] = {"chat_id": real_chat_id}
         if topic_id is not None:
@@ -315,13 +340,9 @@ class TelegramAdapter(BaseChannelAdapter):
         try:
             with open(file_path, "rb") as f:
                 if media_type == "audio":
-                    # TTS-generated files should be sent as voice notes;
-                    # regular audio files go as audio (music player).
-                    from pocketpaw.config import get_config_dir
-                    is_tts = Path(file_path).is_relative_to(
-                        get_config_dir() / "generated" / "audio"
-                    )
-                    if is_tts:
+                    # Voice-note behavior is driven by OutboundMessage metadata,
+                    # not by adapter-local filesystem path assumptions.
+                    if is_voice:
                         try:
                             await self.app.bot.send_voice(**kwargs, voice=f)
                         except Exception:
