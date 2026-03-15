@@ -102,6 +102,9 @@ class TriggerEngine:
         """
         self.callback = callback
 
+        # store running asyncio loop
+        self.loop = asyncio.get_running_loop()
+
         if self._own_scheduler and not self.scheduler.running:
             self.scheduler.start()
             logger.info("TriggerEngine scheduler started")

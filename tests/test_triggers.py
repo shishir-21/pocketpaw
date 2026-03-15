@@ -1,4 +1,6 @@
 import asyncio
+import os
+import tempfile
 
 import pytest
 
@@ -6,7 +8,7 @@ from pocketpaw.daemon.triggers import TriggerEngine
 
 
 @pytest.mark.asyncio
-async def test_idle_trigger():
+async def test_file_watch_trigger():
     engine = TriggerEngine()
 
     triggered = False
@@ -17,18 +19,29 @@ async def test_idle_trigger():
 
     engine.start(callback)
 
+    # create temporary file
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        test_path = tmp.name
+
     intention = {
-        "id": "test_idle",
-        "name": "Idle Test",
+        "id": "test_file_watch",
+        "name": "File Watch Test",
         "enabled": True,
         "trigger": {
-            "type": "idle",
-            "idle_minutes": 0.01
+            "type": "file_watch",
+            "path": test_path
         }
     }
 
     engine.add_intention(intention)
 
+    # modify file
+    with open(test_path, "a") as f:
+        f.write("trigger")
+
+    # wait for watchdog event
     await asyncio.sleep(1)
 
     assert triggered
+
+    os.remove(test_path)
