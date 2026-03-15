@@ -273,7 +273,6 @@ class TriggerEngine:
         """Watch a file for changes and trigger intention."""
         try:
             import os
-            
             from watchdog.events import FileSystemEventHandler
             from watchdog.observers import Observer
 
@@ -291,11 +290,15 @@ class TriggerEngine:
             class Handler(FileSystemEventHandler):
                 def on_modified(self, event):
                     if os.path.basename(event.src_path) == target_file:
-                        asyncio.create_task(engine._fire_trigger(intention))
+                        asyncio.run_coroutine_threadsafe(
+                            engine._fire_trigger(intention),
+                            engine.loop
+                        )
 
             observer = Observer()
             observer.schedule(Handler(), path=watch_dir, recursive=False)
             observer.start()
+
             self._observers.append(observer)
 
             logger.info(f"File watch trigger added for {path}")
