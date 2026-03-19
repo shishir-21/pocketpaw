@@ -8,6 +8,7 @@ Future support planned for:
 - File watch triggers (watchdog)
 - Idle detection triggers
 """
+
 import asyncio
 import logging
 from collections.abc import Callable
@@ -88,9 +89,8 @@ class TriggerEngine:
         self._own_scheduler = scheduler is None
         self.scheduler = scheduler or AsyncIOScheduler()
         self.callback: Callable | None = None
-        self._observers: list = []   # <-- ADD THIS LINE
+        self._observers: dict[str, any] = {}
         self._jobs: dict[str, str] = {}  # intention_id -> job_id
-
 
     def start(self, callback: Callable) -> None:
         """
@@ -113,6 +113,12 @@ class TriggerEngine:
         """Stop the trigger engine and remove all jobs."""
         self.remove_all_jobs()
 
+        # Stop and join all file watch observers
+        for observer in self._observers.values():
+            observer.stop()
+            observer.join()
+        self._observers.clear()
+
         if self._own_scheduler and self.scheduler.running:
             self.scheduler.shutdown(wait=False)
             logger.info("TriggerEngine scheduler stopped")
@@ -134,21 +140,13 @@ class TriggerEngine:
         trigger_config = intention.get("trigger", {})
         trigger_type = trigger_config.get("type")
 
+        # Keep the 'cron' trigger logic
         if trigger_type == "cron":
             return self._add_cron_trigger(intention)
 
+        # Keep the 'file_watch' trigger logic
         elif trigger_type == "file_watch":
             return self._add_file_watch_trigger(intention)
-
-        elif trigger_type == "idle":
-            return self._add_idle_trigger(intention)
-
-        elif trigger_type == "bus_event":
-            return self._add_bus_event_trigger(intention)
-
-        elif trigger_type == "webhook":
-            logger.info("Webhook trigger registered")
-            return True
 
         else:
             logger.warning(f"Unknown trigger type: {trigger_type}")
@@ -205,24 +203,31 @@ class TriggerEngine:
     def remove_intention(self, intention_id: str) -> bool:
         """
         Remove trigger for an intention.
-
-        Args:
-            intention_id: ID of the intention to remove
-
-        Returns:
-            True if trigger was removed
         """
+        removed = False
+
+        # 1. Remove cron job
         job_id = self._jobs.get(intention_id)
         if job_id:
             try:
                 self.scheduler.remove_job(job_id)
                 del self._jobs[intention_id]
-                logger.info(f"Removed trigger for intention: {intention_id}")
-                return True
+                removed = True
             except Exception as e:
-                logger.error(f"Failed to remove trigger {intention_id}: {e}")
+                logger.error(f"Failed to remove job {intention_id}: {e}")
 
-        return False
+        # 2. Remove file watch observer
+        observer = self._observers.get(intention_id)
+        if observer:
+            observer.stop()
+            observer.join()
+            del self._observers[intention_id]
+            removed = True
+
+        if removed:
+            logger.info(f"Removed trigger for intention: {intention_id}")
+
+        return removed
 
     def remove_all_jobs(self) -> None:
         """Remove all intention triggers."""
@@ -260,7 +265,7 @@ class TriggerEngine:
         Manually trigger an intention immediately.
 
         Args:
-        intention: Intention to run
+            intention: Intention to run
         """
         if self.callback:
             try:
@@ -271,11 +276,12 @@ class TriggerEngine:
             else:
                 # Already inside a running loop (e.g. pytest-asyncio) — schedule, don't block
                 asyncio.create_task(self._fire_trigger(intention))
-    
+
     def _add_file_watch_trigger(self, intention: dict) -> bool:
         """Watch a file for changes and trigger intention."""
         try:
             import os
+
             from watchdog.events import FileSystemEventHandler
             from watchdog.observers import Observer
 
@@ -294,59 +300,18 @@ class TriggerEngine:
                 def on_modified(self, event):
                     if os.path.basename(event.src_path) == target_file:
                         asyncio.run_coroutine_threadsafe(
-                            engine._fire_trigger(intention),
-                            engine.loop
+                            engine._fire_trigger(intention), engine.loop
                         )
 
             observer = Observer()
             observer.schedule(Handler(), path=watch_dir, recursive=False)
             observer.start()
 
-            self._observers.append(observer)
+            self._observers[intention["id"]] = observer
 
             logger.info(f"File watch trigger added for {path}")
             return True
 
         except Exception as e:
             logger.error(f"Failed to add file watch trigger: {e}")
-            return False
-        
-    def _add_idle_trigger(self, intention: dict) -> bool:
-        """Trigger intention after idle time."""
-        try:
-            
-
-            idle_minutes = intention["trigger"].get("idle_minutes", 30)
-
-            async def idle_checker():
-                while True:
-                    await asyncio.sleep(idle_minutes * 60)
-                    logger.info(f"Idle trigger fired for {intention['name']}")
-                    await self._fire_trigger(intention)
-
-            asyncio.create_task(idle_checker())
-
-            logger.info(f"Idle trigger added ({idle_minutes} minutes)")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to add idle trigger: {e}")
-            return False
-        
-    def _add_bus_event_trigger(self, intention: dict) -> bool:
-        """Trigger intention when a system event occurs."""
-        try:
-            event_type = intention["trigger"].get("event_type")
-
-            if not event_type:
-                logger.error("bus_event trigger missing event_type")
-                return False
-
-            logger.info(f"Bus event trigger registered for event: {event_type}")
-
-            # Placeholder (real bus system integration may be added later)
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to add bus_event trigger: {e}")
             return False
