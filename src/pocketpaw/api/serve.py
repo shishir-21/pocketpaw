@@ -52,7 +52,7 @@ def create_api_app():
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_ORIGINS,
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -146,10 +146,9 @@ def run_api_server(
         import socket
 
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
         except Exception:
             local_ip = "<your-server-ip>"
         print(f"\n\U0001f310 API docs: http://{local_ip}:{port}/api/v1/docs")

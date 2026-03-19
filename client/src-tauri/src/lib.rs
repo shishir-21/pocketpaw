@@ -32,7 +32,24 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_notification::init());
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir { file_name: Some("pocketpaw-client".into()) },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Webview,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .level(log::LevelFilter::Info)
+                .build(),
+        );
 
     // Desktop-only plugins
     #[cfg(desktop)]
@@ -64,6 +81,7 @@ pub fn run() {
             commands::read_access_token,
             commands::get_pocketpaw_config_dir,
             commands::check_backend_running,
+            commands::check_pocketpaw_version,
             commands::check_pocketpaw_installed,
             commands::install_pocketpaw,
             commands::start_pocketpaw_backend,
@@ -71,6 +89,8 @@ pub fn run() {
             oauth::read_oauth_tokens,
             oauth::save_oauth_tokens,
             oauth::clear_oauth_tokens,
+            oauth::proxy_post,
+            oauth::proxy_get,
             fs_commands::fs_read_dir,
             fs_commands::fs_read_file_text,
             fs_commands::fs_write_file,
@@ -138,6 +158,10 @@ pub fn run() {
                 tray::setup_tray(_app.handle())?;
 
                 let window = _app.get_webview_window("main").unwrap();
+
+                // Open devtools in debug builds
+                #[cfg(debug_assertions)]
+                window.open_devtools();
 
                 // Apply native vibrancy/mica/acrylic to all pre-created windows
                 let effect = vibrancy::apply_native_effect(&window, None);

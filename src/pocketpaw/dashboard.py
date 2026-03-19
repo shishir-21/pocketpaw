@@ -99,6 +99,7 @@ from pocketpaw.deep_work.api import router as deep_work_router
 from pocketpaw.memory import MemoryType, get_memory_manager
 from pocketpaw.mission_control.api import router as mission_control_router
 from pocketpaw.security import get_audit_logger
+from pocketpaw.security.redact import safe_install_error
 from pocketpaw.skills import get_skill_loader
 from pocketpaw.tunnel import get_tunnel_manager
 
@@ -134,7 +135,8 @@ _BUILTIN_ORIGINS = [
 ]
 try:
     _custom_origins = Settings.load().api_cors_allowed_origins
-except Exception:
+except Exception as e:
+    logger.debug("Failed to load custom CORS origins: %s", e)
     _custom_origins = []
 _EXTRA_ORIGINS = list(set(_BUILTIN_ORIGINS + _custom_origins))
 
@@ -190,6 +192,14 @@ app.include_router(deep_work_router, prefix="/api/deep-work")
 # Mount API v1 routers at /api/v1/ (canonical) — see api/v1/__init__.py
 mount_v1_routers(app)
 
+# Mount A2A Protocol routers (agent card + task endpoints) — see a2a/server.py
+try:
+    from pocketpaw.a2a.server import register_routes as _a2a_register_routes
+
+    _a2a_register_routes(app)
+except Exception as _a2a_exc:
+    logger.warning("A2A Protocol unavailable — skipping router mount: %s", _a2a_exc)
+
 # Mount channel management router (webhooks, extras, channel status/toggle)
 app.include_router(channels_router)
 
@@ -203,7 +213,7 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_EXTRA_ORIGINS,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -653,7 +663,8 @@ async def list_available_backends():
                 attr = hint.get("verify_attr")
                 if attr and not hasattr(mod, attr):
                     return False
-            except Exception:
+            except Exception as e:
+                logger.debug("Backend validation failed: %s", e)
                 return False
         # Check CLI binary if this backend needs one
         binary = _CLI_BINARY.get(info.name)
@@ -700,10 +711,8 @@ async def list_available_backends():
 @app.post("/api/backends/install")
 async def install_backend(request: Request):
     """Auto-install a pip-installable backend SDK."""
-    import asyncio
     import importlib
     import shutil
-    import subprocess
     import sys
 
     from pocketpaw.agents.registry import get_backend_info
@@ -720,33 +729,43 @@ async def install_backend(request: Request):
     if not pip_spec or not verify_import:
         return {"error": f"Backend '{backend_name}' is not pip-installable"}
 
-    def _install() -> None:
-        in_venv = hasattr(sys, "real_prefix") or sys.prefix != sys.base_prefix
-        uv = shutil.which("uv")
-        if uv:
-            cmd = [uv, "pip", "install", "--python", sys.executable]
-            if not in_venv:
-                cmd.append("--system")
-            cmd.append(pip_spec)
-        else:
-            cmd = [sys.executable, "-m", "pip", "install"]
-            if not in_venv:
-                cmd.append("--user")
-            cmd.append(pip_spec)
+    in_venv = hasattr(sys, "real_prefix") or sys.prefix != sys.base_prefix
+    uv = shutil.which("uv")
+    if uv:
+        cmd = [uv, "pip", "install", "--python", sys.executable]
+        if not in_venv:
+            cmd.append("--system")
+        cmd.append(pip_spec)
+    else:
+        cmd = [sys.executable, "-m", "pip", "install"]
+        if not in_venv:
+            cmd.append("--user")
+        cmd.append(pip_spec)
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to install {pip_spec}:\n{result.stderr.strip()}")
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
 
+    try:
+        _, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+    except TimeoutError:
+        process.kill()
+        await process.communicate()
+        return {"error": f"Install failed: timed out while installing {pip_spec}"}
+
+    if process.returncode != 0:
+        err = safe_install_error(stderr)
+        return {"error": f"Failed to install {pip_spec}:\n{err}"}
+
+    try:
         importlib.invalidate_caches()
         # Clear stale module entries so Python retries imports
         for key in list(sys.modules):
             if key == verify_import or key.startswith(verify_import + "."):
                 del sys.modules[key]
         importlib.import_module(verify_import)
-
-    try:
-        await asyncio.to_thread(_install)
     except RuntimeError as exc:
         return {"error": str(exc)}
     except Exception as exc:
@@ -884,10 +903,10 @@ async def get_version_info():
     from importlib.metadata import version as get_version
 
     from pocketpaw.config import get_config_dir
-    from pocketpaw.update_check import check_for_updates
+    from pocketpaw.update_check import check_for_updates_async
 
     current = get_version("pocketpaw")
-    info = check_for_updates(current, get_config_dir())
+    info = await check_for_updates_async(current, get_config_dir())
     return info or {"current": current, "latest": current, "update_available": False}
 
 
@@ -925,7 +944,7 @@ async def start_tunnel():
         url = await manager.start()
         return {"url": url, "active": True}
     except Exception as e:
-        # Error handling via JSON to frontend
+        logger.warning("Failed to start tunnel: %s", e)
         return {"error": str(e), "active": False}
 
 
@@ -1077,13 +1096,12 @@ async def get_telegram_pairing_status():
     return {"paired": paired, "user_id": user_id}
 
 
-@app.websocket("/ws")
-async def websocket_endpoint(
+async def _handle_dashboard_ws(
     websocket: WebSocket,
-    token: str | None = Query(None),
-    resume_session: str | None = Query(None),
+    token: str | None,
+    resume_session: str | None,
 ):
-    """WebSocket endpoint — delegates to dashboard_ws.websocket_handler()."""
+    """Shared WebSocket handler for /ws and /api/v1/ws."""
     from pocketpaw.dashboard_ws import websocket_handler
 
     await websocket_handler(
@@ -1093,6 +1111,36 @@ async def websocket_endpoint(
         _is_genuine_localhost_fn=_is_genuine_localhost,
         _get_access_token_fn=get_access_token,
     )
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: str | None = Query(None),
+    resume_session: str | None = Query(None),
+):
+    """WebSocket endpoint — delegates to dashboard_ws.websocket_handler()."""
+    await _handle_dashboard_ws(websocket, token, resume_session)
+
+
+@app.websocket("/api/v1/ws")
+async def websocket_v1_endpoint(
+    websocket: WebSocket,
+    token: str | None = Query(None),
+    resume_session: str | None = Query(None),
+):
+    """WebSocket v1 endpoint — matches client's API_PREFIX + /ws path."""
+    await _handle_dashboard_ws(websocket, token, resume_session)
+
+
+@app.websocket("/v1/ws")
+async def websocket_v1_short_endpoint(
+    websocket: WebSocket,
+    token: str | None = Query(None),
+    resume_session: str | None = Query(None),
+):
+    """WebSocket v1 short path — for clients using /v1/ws."""
+    await _handle_dashboard_ws(websocket, token, resume_session)
 
 
 # ==================== Transparency APIs ====================
@@ -1118,7 +1166,8 @@ async def save_identity(request: Request):
 
     try:
         data = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.debug("Invalid JSON payload received: %s", e)
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
     identity_dir = get_config_path().parent / "identity"
@@ -1361,9 +1410,10 @@ async def get_audit_log(limit: int = 100):
                 break
             try:
                 logs.append(json.loads(line))
-            except Exception:
-                pass
-    except Exception:
+            except Exception as e:
+                logger.debug("Failed to parse log line: %s", e)
+    except Exception as e:
+        logger.warning("Failed to load logs: %s", e)
         return []
 
     return logs
@@ -1459,8 +1509,8 @@ async def get_self_audit_reports():
                     "issues": data.get("issues", 0),
                 }
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Ignoring error while generating reports: %s", e)
     return reports
 
 
@@ -1509,7 +1559,8 @@ async def get_health_errors(limit: int = 20, search: str = ""):
 
         engine = get_health_engine()
         return engine.get_recent_errors(limit=limit, search=search)
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to retrieve recent errors: %s", e)
         return []
 
 
@@ -1523,6 +1574,7 @@ async def clear_health_errors():
         engine.error_store.clear()
         return {"cleared": True}
     except Exception as e:
+        logger.error("Failed to clear errors: %s", e)
         return {"cleared": False, "error": str(e)}
 
 
@@ -1539,8 +1591,8 @@ async def restart_server(request: Request):
     if request.headers.get("content-type", "").startswith("application/json"):
         try:
             body = await request.json()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Request body parsing failed: %s", e)
 
     if not body.get("confirm"):
         return JSONResponse(
@@ -1673,10 +1725,9 @@ def run_dashboard(
             import socket
 
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                s.close()
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.connect(("8.8.8.8", 80))
+                    local_ip = s.getsockname()[0]
             except Exception:
                 local_ip = "<your-server-ip>"
             print(f"\n🌐 Open http://{local_ip}:{port} in your browser")

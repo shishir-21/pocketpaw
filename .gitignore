@@ -75,3 +75,4 @@ client/bun.lock
 None/
 *.sqlite3
 *.bin
+private.key

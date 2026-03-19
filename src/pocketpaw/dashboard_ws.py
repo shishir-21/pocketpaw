@@ -23,6 +23,7 @@ from pocketpaw.dashboard_state import (
     agent_loop,
     ws_adapter,
 )
+from pocketpaw.llm.client import resolve_backend_env
 from pocketpaw.memory import get_memory_manager
 from pocketpaw.scheduler import get_scheduler
 from pocketpaw.security.rate_limiter import ws_limiter
@@ -94,8 +95,8 @@ async def websocket_handler(
 
                 if get_api_key_manager().verify(t) is not None:
                     return True
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("API key verification failed: %s", exc)
         # Accept OAuth2 access tokens (ppat_* prefix)
         if t.startswith("ppat_"):
             try:
@@ -103,8 +104,8 @@ async def websocket_handler(
 
                 if get_oauth_server().verify_access_token(t) is not None:
                     return True
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("OAuth token verification failed: %s", exc)
         return False
 
     # Check HTTP-only session cookie
@@ -168,13 +169,18 @@ async def websocket_handler(
         parts = resume_session.split("_", 1)
         if len(parts) == 2 and parts[0] == "websocket":
             raw_id = parts[1]
-            # Verify session file exists
-            session_file = (
-                Path.home() / ".pocketpaw" / "memory" / "sessions" / f"{resume_session}.json"
-            )
-            if session_file.exists():
-                chat_id = raw_id
-                resumed = True
+            # Verify session file exists and path stays under sessions dir
+            sessions_dir = Path.home() / ".pocketpaw" / "memory" / "sessions"
+            session_file = sessions_dir / f"{resume_session}.json"
+            try:
+                session_file.resolve().relative_to(sessions_dir.resolve())
+            except ValueError:
+                logger.warning("Path traversal attempt in resume_session: %s", resume_session)
+                resume_session = None  # fall through to fresh session
+            else:
+                if session_file.exists():
+                    chat_id = raw_id
+                    resumed = True
 
     await ws_adapter.register_connection(websocket, chat_id)
 
@@ -342,6 +348,8 @@ async def websocket_handler(
                         if isinstance(val, int | float) and 1 <= val <= 200:
                             settings.openai_agents_max_turns = int(val)
                     # Google ADK
+                    if data.get("google_adk_provider"):
+                        settings.google_adk_provider = data["google_adk_provider"]
                     if "google_adk_model" in data:
                         settings.google_adk_model = data["google_adk_model"]
                     if "google_adk_max_turns" in data:
@@ -392,6 +400,17 @@ async def websocket_handler(
                             settings.openai_compatible_max_tokens = int(val)
                     if data.get("gemini_model"):
                         settings.gemini_model = data["gemini_model"]
+                    # LiteLLM
+                    if data.get("litellm_api_base") is not None:
+                        settings.litellm_api_base = data["litellm_api_base"]
+                    if data.get("litellm_api_key") is not None:
+                        settings.litellm_api_key = data["litellm_api_key"]
+                    if data.get("litellm_model") is not None:
+                        settings.litellm_model = data["litellm_model"]
+                    if "litellm_max_tokens" in data:
+                        val = data["litellm_max_tokens"]
+                        if isinstance(val, int | float) and 0 <= val <= 1000000:
+                            settings.litellm_max_tokens = int(val)
                     if "bypass_permissions" in data:
                         settings.bypass_permissions = bool(data.get("bypass_permissions"))
                     if data.get("web_search_provider"):
@@ -402,6 +421,16 @@ async def websocket_handler(
                         settings.injection_scan_enabled = bool(data["injection_scan_enabled"])
                     if "injection_scan_llm" in data:
                         settings.injection_scan_llm = bool(data["injection_scan_llm"])
+                    if "pii_scan_enabled" in data:
+                        settings.pii_scan_enabled = bool(data["pii_scan_enabled"])
+                    if data.get("pii_default_action"):
+                        settings.pii_default_action = data["pii_default_action"]
+                    if "pii_scan_memory" in data:
+                        settings.pii_scan_memory = bool(data["pii_scan_memory"])
+                    if "pii_scan_audit" in data:
+                        settings.pii_scan_audit = bool(data["pii_scan_audit"])
+                    if "pii_scan_logs" in data:
+                        settings.pii_scan_logs = bool(data["pii_scan_logs"])
                     if data.get("tool_profile"):
                         settings.tool_profile = data["tool_profile"]
                     if "plan_mode" in data:
@@ -462,8 +491,42 @@ async def websocket_handler(
                         val = data["web_port"]
                         if isinstance(val, int | float) and 1 <= val <= 65535:
                             settings.web_port = int(val)
+                    # A2A Protocol
+                    if "a2a_enabled" in data:
+                        settings.a2a_enabled = bool(data["a2a_enabled"])
+                    if data.get("a2a_agent_name"):
+                        settings.a2a_agent_name = data["a2a_agent_name"]
+                    if "a2a_agent_description" in data:
+                        settings.a2a_agent_description = data.get("a2a_agent_description", "")
+                    if "a2a_task_timeout" in data:
+                        val = data["a2a_task_timeout"]
+                        if isinstance(val, int | float) and 10 <= val <= 600:
+                            settings.a2a_task_timeout = int(val)
+                    if "a2a_trusted_agents" in data:
+                        val = data["a2a_trusted_agents"]
+                        if isinstance(val, list):
+                            settings.a2a_trusted_agents = [
+                                s.strip() for s in val if isinstance(s, str) and s.strip()
+                            ]
+
+                    # Soul Protocol
+                    if "soul_enabled" in data:
+                        settings.soul_enabled = bool(data["soul_enabled"])
+                    if data.get("soul_name"):
+                        settings.soul_name = data["soul_name"]
+                    if data.get("soul_archetype"):
+                        settings.soul_archetype = data["soul_archetype"]
+                    if "soul_persona" in data:
+                        settings.soul_persona = data.get("soul_persona", "")
+                    if "soul_auto_save_interval" in data:
+                        val = data["soul_auto_save_interval"]
+                        if isinstance(val, int | float) and 0 <= val <= 3600:
+                            settings.soul_auto_save_interval = int(val)
                     warnings = validate_api_keys(settings)
                     settings.save()
+
+                # Sync env vars so running backends see updated keys
+                resolve_backend_env(settings, force=True)
 
                 # Reset the agent loop's router to pick up new settings
                 agent_loop.reset_router()
@@ -476,6 +539,17 @@ async def websocket_handler(
                 # Reload memory manager with fresh settings
                 agent_loop.memory = get_memory_manager(force_reload=True)
                 agent_loop.context_builder.memory = agent_loop.memory
+
+                # Re-run health checks so status reflects new settings
+                # (e.g. switching provider to litellm clears the "no API key" warning)
+                try:
+                    from pocketpaw.health import get_health_engine
+
+                    engine = get_health_engine()
+                    engine.run_startup_checks()
+                    await websocket.send_json({"type": "health_update", "data": engine.summary})
+                except Exception:
+                    pass  # health refresh is best-effort
 
                 await websocket.send_json(
                     {
@@ -520,6 +594,7 @@ async def websocket_handler(
                     if provider == "anthropic" and key:
                         settings.anthropic_api_key = key
                         settings.save()
+                        resolve_backend_env(settings, force=True)
                         agent_loop.reset_router()
                         await websocket.send_json(
                             _api_key_response(
@@ -530,6 +605,7 @@ async def websocket_handler(
                     elif provider == "openai" and key:
                         settings.openai_api_key = key
                         settings.save()
+                        resolve_backend_env(settings, force=True)
                         agent_loop.reset_router()
                         await websocket.send_json(
                             _api_key_response(
@@ -540,6 +616,7 @@ async def websocket_handler(
                     elif provider == "google" and key:
                         settings.google_api_key = key
                         settings.save()
+                        resolve_backend_env(settings, force=True)
                         agent_loop.reset_router()
                         await websocket.send_json(_api_key_response("\u2705 Google API key saved!"))
                     elif provider == "tavily" and key:
@@ -617,6 +694,7 @@ async def websocket_handler(
                             "openaiAgentsProvider": settings.openai_agents_provider,
                             "openaiAgentsModel": settings.openai_agents_model,
                             "openaiAgentsMaxTurns": settings.openai_agents_max_turns,
+                            "googleAdkProvider": settings.google_adk_provider,
                             "googleAdkModel": settings.google_adk_model,
                             "googleAdkMaxTurns": settings.google_adk_max_turns,
                             "codexCliModel": settings.codex_cli_model,
@@ -636,6 +714,10 @@ async def websocket_handler(
                             "openaiCompatibleMaxTokens": settings.openai_compatible_max_tokens,
                             "hasOpenaiCompatibleKey": bool(settings.openai_compatible_api_key),
                             "geminiModel": settings.gemini_model,
+                            "litellmApiBase": settings.litellm_api_base,
+                            "litellmModel": settings.litellm_model,
+                            "litellmMaxTokens": settings.litellm_max_tokens,
+                            "hasLitellmKey": bool(settings.litellm_api_key),
                             "hasGoogleApiKey": bool(settings.google_api_key),
                             "bypassPermissions": settings.bypass_permissions,
                             "hasAnthropicKey": bool(settings.anthropic_api_key),
@@ -647,6 +729,11 @@ async def websocket_handler(
                             "hasParallelKey": bool(settings.parallel_api_key),
                             "injectionScanEnabled": settings.injection_scan_enabled,
                             "injectionScanLlm": settings.injection_scan_llm,
+                            "piiScanEnabled": settings.pii_scan_enabled,
+                            "piiDefaultAction": settings.pii_default_action,
+                            "piiScanMemory": settings.pii_scan_memory,
+                            "piiScanAudit": settings.pii_scan_audit,
+                            "piiScanLogs": settings.pii_scan_logs,
                             "toolProfile": settings.tool_profile,
                             "planMode": settings.plan_mode,
                             "planModeTools": ",".join(settings.plan_mode_tools),
@@ -678,6 +765,18 @@ async def websocket_handler(
                             "hasSarvamKey": bool(settings.sarvam_api_key),
                             "webHost": settings.web_host,
                             "webPort": settings.web_port,
+                            # A2A Protocol
+                            "a2aEnabled": settings.a2a_enabled,
+                            "a2aAgentName": settings.a2a_agent_name,
+                            "a2aAgentDescription": settings.a2a_agent_description,
+                            "a2aTaskTimeout": settings.a2a_task_timeout,
+                            "a2aTrustedAgents": settings.a2a_trusted_agents,
+                            # Soul Protocol
+                            "soulEnabled": settings.soul_enabled,
+                            "soulName": settings.soul_name,
+                            "soulArchetype": settings.soul_archetype,
+                            "soulPersona": settings.soul_persona,
+                            "soulAutoSaveInterval": settings.soul_auto_save_interval,
                             "agentActive": agent_active,
                             "agentStatus": agent_status,
                         },
