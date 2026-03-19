@@ -10,6 +10,8 @@ services:
       - ./identity:/home/pocketpaw/.pocketpaw/identity
       # Agent-created files (via Write/Bash tools)
       - ./workspace:/home/pocketpaw/workspace
+      # Mount Claude Code credentials from host (reuse your `claude` CLI login)
+      - ${CLAUDE_CONFIG_DIR:-~/.claude}:/home/pocketpaw/.claude:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
