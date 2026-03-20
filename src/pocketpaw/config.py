@@ -973,9 +973,14 @@ def _migrate_plaintext_keys() -> None:
         if value and isinstance(value, str):
             store.set(field, value)
             migrated_count += 1
+            # Remove plaintext secret from config to prevent leakage
+            del data[field]
 
     if migrated_count:
         logger.info("Copied %d secret(s) from config to encrypted store.", migrated_count)
+        # Save the cleaned config back to remove plaintext secrets
+        config_path.write_text(json.dumps(data, indent=2))
+        _chmod_safe(config_path, 0o600)
 
     _MIGRATION_DONE_PATH.write_text("1")
     _chmod_safe(_MIGRATION_DONE_PATH, 0o600)
