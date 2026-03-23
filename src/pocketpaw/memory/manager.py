@@ -39,7 +39,7 @@ def create_memory_store(
     Factory function to create the appropriate memory store.
 
     Args:
-        backend: Backend type - 'file' or 'mem0'
+        backend: Backend type - 'file', 'mem0', or legacy 'vector' (maps to file+vector)
         base_path: Base path for storage
         user_id: User ID for mem0 scoping
         use_inference: Whether to use LLM inference (mem0 only)

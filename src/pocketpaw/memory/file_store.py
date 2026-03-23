@@ -471,18 +471,38 @@ class FileMemoryStore:
                 await self._upsert_vector_record(entry)
             return
 
-        def _get_existing_ids() -> set[str]:
+        def _get_existing_ids_for_batch(ids: list[str]) -> set[str]:
+            if not ids:
+                return set()
+            placeholders = ",".join("?" for _ in ids)
+            query = f"SELECT doc_id FROM memory_vectors WHERE doc_id IN ({placeholders})"
             with sqlite3.connect(self._vector_db_path) as conn:
-                rows = conn.execute("SELECT doc_id FROM memory_vectors").fetchall()
+                rows = conn.execute(query, ids).fetchall()
             return {str(row[0]) for row in rows}
 
-        existing_ids = await asyncio.to_thread(_get_existing_ids)
         pending: list[MemoryEntry] = []
-        for entry_id, entry in self._index.items():
-            if entry_id not in existing_ids:
-                pending.append(entry)
-            if len(pending) >= max_items:
+        batch_size = 200
+        items = iter(self._index.items())
+
+        while len(pending) < max_items:
+            batch: list[tuple[str, MemoryEntry]] = []
+            for _ in range(batch_size):
+                try:
+                    batch.append(next(items))
+                except StopIteration:
+                    break
+
+            if not batch:
                 break
+
+            batch_ids = [entry_id for entry_id, _entry in batch]
+            existing_batch_ids = await asyncio.to_thread(_get_existing_ids_for_batch, batch_ids)
+
+            for entry_id, entry in batch:
+                if entry_id not in existing_batch_ids:
+                    pending.append(entry)
+                    if len(pending) >= max_items:
+                        break
 
         for entry in pending:
             await self._upsert_vector_record(entry)
@@ -522,6 +542,7 @@ class FileMemoryStore:
     async def _semantic_search_sqlite(self, query: str, user_id: str, limit: int) -> list[dict]:
         """Semantic search using local sqlite vector table."""
         query_embedding = await self._embed_text(query)
+        candidate_limit = max(limit * 50, 500)
 
         def _search_sync() -> list[dict]:
             with sqlite3.connect(self._vector_db_path) as conn:
@@ -530,8 +551,10 @@ class FileMemoryStore:
                     SELECT doc_id, content, memory_type, embedding_json
                     FROM memory_vectors
                     WHERE user_scope = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
                     """,
-                    (user_id,),
+                    (user_id, candidate_limit),
                 )
                 rows = cursor.fetchall()
 
@@ -1208,11 +1231,19 @@ class FileMemoryStore:
             if session_file.exists():
                 try:
                     data = json.loads(session_file.read_text(encoding="utf-8"))
-                    count = len(data)
-                    ids = [str(item.get("id", "")) for item in data if item.get("id")]
+                    if isinstance(data, list):
+                        count = len(data)
+                        ids = [
+                            str(item.get("id", ""))
+                            for item in data
+                            if isinstance(item, dict) and item.get("id")
+                        ]
+                    else:
+                        count = 0
+                        ids = []
                     session_file.unlink()
                     return count, ids
-                except json.JSONDecodeError as exc:
+                except (json.JSONDecodeError, OSError) as exc:
                     logger.warning("Corrupt session file removed %s: %s", session_file, exc)
                     session_file.unlink()
                     return 0, []
