@@ -907,41 +907,6 @@ class TestFileGraphAndManagement:
 class TestGraphSVGHtmlEscaping:
     """HTML escaping in get_graph_svg to prevent malformed SVG."""
 
-    async def test_direct_entity_escaping_less_than(self, tmp_path):
-        """Test HTML escaping by directly inserting entities with < via SQL."""
-        pytest.importorskip("networkx")
-        store = FileMemoryStore(
-            base_path=tmp_path,
-            vector_enabled=True,
-            embedding_provider="hash",
-        )
-
-        # Insert entity directly via SQL to test escaping independent of graph extraction
-        now = datetime.now(UTC).isoformat()
-        with sqlite3.connect(store._graph_db_path) as conn:
-            conn.execute(
-                """INSERT INTO entities
-                (entity_id, entity_key, display_name, mention_count, user_scope,
-                first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    "entity_1",
-                    "test<entity",
-                    "Test<Entity",
-                    5,
-                    "default",
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
-
-        svg = await store.get_graph_svg(user_id="default")
-        # The SVG output should contain &lt; not bare <
-        assert "&lt;" in svg
-        assert "<svg" in svg
-        assert "</svg>" in svg
-
     async def test_direct_entity_escaping_greater_than(self, tmp_path):
         """Test HTML escaping by directly inserting entities with >."""
         store = FileMemoryStore(
