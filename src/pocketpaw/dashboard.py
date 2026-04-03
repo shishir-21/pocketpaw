@@ -25,6 +25,7 @@ Changes:
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import base64
 import io
 import json
@@ -117,8 +118,24 @@ TEMPLATES_DIR = FRONTEND_DIR / "templates"
 # Initialize Templates
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await startup_event()
+    yield
+    await shutdown_event()
+
+
+async def startup_event():
+    await _startup_event(_start_channel_adapter_fn=_start_channel_adapter)
+
+
+async def shutdown_event():
+    await _shutdown_event(_stop_channel_adapter_fn=_stop_channel_adapter)
+
 # Create FastAPI app
 app = FastAPI(
+    lifespan=lifespan,
     title="PocketPaw API",
     description="Self-hosted AI agent — REST API for external clients and the web dashboard.",
     version="1.0.0",
@@ -220,14 +237,7 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-async def startup_event():
-    await _startup_event(_start_channel_adapter_fn=_start_channel_adapter)
 
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await _shutdown_event(_stop_channel_adapter_fn=_stop_channel_adapter)
 
 
 # ==================== MCP Server API ====================
@@ -1393,6 +1403,38 @@ async def delete_long_term_memory(entry_id: str):
     return {"ok": True}
 
 
+@app.patch("/api/memory/long_term/{entry_id}")
+async def update_long_term_memory(entry_id: str, request: Request):
+    """Update a long-term memory entry by ID."""
+    data = await request.json()
+    content = data.get("content")
+    tags = data.get("tags")
+
+    manager = get_memory_manager()
+    updated = await manager.update_memory(entry_id, content=content, tags=tags)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Memory entry not found or update unsupported")
+    return {"ok": True}
+
+
+@app.get("/api/memory/graph")
+async def get_memory_graph(q: str = "", limit: int = 200):
+    """Get lightweight knowledge graph snapshot for memory visualization."""
+    manager = get_memory_manager()
+    return await manager.get_graph_snapshot(query=q or None, limit=max(1, min(limit, 500)))
+
+
+@app.post("/api/memory/prune")
+async def prune_memory(request: Request):
+    """Prune old memories and clean orphan vector/graph records."""
+    data = await request.json()
+    days = int(data.get("older_than_days", 30))
+    days = max(1, min(days, 3650))
+
+    manager = get_memory_manager()
+    return await manager.prune_memories(older_than_days=days)
+
+
 @app.get("/api/audit")
 async def get_audit_log(limit: int = 100):
     """Get audit logs."""
@@ -1421,12 +1463,40 @@ async def get_audit_log(limit: int = 100):
 
 @app.delete("/api/audit")
 async def clear_audit_log():
-    """Clear the audit log file."""
-    logger = get_audit_logger()
+    """Archive and rotate the audit log file.
+
+    Instead of deleting the audit log (which would violate the append-only
+    guarantee), this endpoint archives the current log to a timestamped file
+    and starts a new empty log. The archive is preserved for compliance.
+    """
+    from datetime import UTC, datetime
+
+    audit = get_audit_logger()
     try:
-        if logger.log_path.exists():
-            logger.log_path.write_text("")
-        return {"ok": True}
+        if audit.log_path.exists() and audit.log_path.stat().st_size > 0:
+            # Archive to timestamped file
+            ts = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+            archive_path = audit.log_path.with_name(f"audit-{ts}.jsonl")
+            import shutil
+
+            shutil.copy2(audit.log_path, archive_path)
+            # Truncate the active log
+            audit.log_path.write_text("")
+            # Log the rotation event in the new log
+            from pocketpaw.security.audit import AuditEvent, AuditSeverity
+
+            audit.log(
+                AuditEvent.create(
+                    severity=AuditSeverity.WARNING,
+                    actor="dashboard_user",
+                    action="audit_log_rotated",
+                    target=str(archive_path),
+                    status="success",
+                    archived_to=str(archive_path),
+                )
+            )
+            return {"ok": True, "archived_to": str(archive_path)}
+        return {"ok": True, "archived_to": None}
     except Exception as e:
         from fastapi.responses import JSONResponse
 
@@ -1680,16 +1750,34 @@ async def save_memory_settings(request: Request):
 async def get_memory_stats():
     """Get memory backend statistics."""
     manager = get_memory_manager()
-    store = manager._store
+    try:
+        return await manager.get_memory_stats()
+    except (AttributeError, TypeError):
+        pass
 
-    if hasattr(store, "get_memory_stats"):
-        return await store.get_memory_stats()
+    store = getattr(manager, "_store", None)
+    if store and hasattr(store, "get_memory_stats"):
+        stats_result = store.get_memory_stats()
+        if hasattr(stats_result, "__await__"):
+            return await stats_result
+        return stats_result
 
-    # File backend basic stats
     return {
         "backend": "file",
-        "total_memories": "N/A (use mem0 for stats)",
+        "total_memories": 0,
+        "session_memories": 0,
+        "long_term_memories": 0,
     }
+
+
+@app.get("/api/memory/graph.svg")
+async def get_memory_graph_svg(q: str = "", limit: int = 200, width: int = 800, height: int = 400):
+    """Get SVG visualization of the memory knowledge graph."""
+    from fastapi.responses import Response
+
+    manager = get_memory_manager()
+    svg = await manager.get_graph_svg(query=q or None, limit=limit, width=width, height=height)
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 def run_dashboard(

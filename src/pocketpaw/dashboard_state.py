@@ -59,6 +59,8 @@ _CHANNEL_CONFIG_KEYS: dict[str, dict[str, str]] = {
         "allowed_user_ids": "discord_allowed_user_ids",
         "allowed_channel_ids": "discord_allowed_channel_ids",
         "conversation_channel_ids": "discord_conversation_channel_ids",
+        "conversation_all_channels": "discord_conversation_all_channels",
+        "conversation_exclude_channel_ids": "discord_conversation_exclude_channel_ids",
         "bot_name": "discord_bot_name",
         "status_type": "discord_status_type",
         "activity_type": "discord_activity_type",
@@ -130,11 +132,17 @@ _CHANNEL_DEPS: dict[str, tuple[str, str, str]] = {
     "matrix": ("nio", "matrix-nio", "pocketpaw[matrix]"),
     "teams": ("botbuilder.core", "botbuilder-core", "pocketpaw[teams]"),
     "google_chat": ("googleapiclient.discovery", "google-api-python-client", "pocketpaw[gchat]"),
+    "graph": ("networkx", "networkx", "pocketpaw[graph]"),
 }
 
 _MEMORY_CONFIG_KEYS = {
     "memory_backend": "memory_backend",
     "memory_use_inference": "memory_use_inference",
+    "file_vector_enabled": "file_vector_enabled",
+    "vector_store": "vector_store",
+    "embedding_provider": "embedding_provider",
+    "embedding_model": "embedding_model",
+    "embedding_base_url": "embedding_base_url",
     "mem0_llm_provider": "mem0_llm_provider",
     "mem0_llm_model": "mem0_llm_model",
     "mem0_embedder_provider": "mem0_embedder_provider",

@@ -5,6 +5,12 @@ Edge cases handled:
 - Concurrent observe(): serialized via asyncio.Lock
 - Periodic auto-save: background task prevents data loss on crash
 - Graceful shutdown: saves state and cancels auto-save task
+- Auto-sync: detects external .soul file changes (v0.2.4+)
+- Rubric self-evaluation: heuristic scoring after interactions (v0.2.4+)
+- Configurable biorhythms: energy/mood dynamics via DNA (v0.2.4+)
+- CognitiveEngine wiring: passes PocketPawCognitiveEngine to Soul so the
+  active agent backend powers fact extraction, significance scoring,
+  and reflection instead of heuristic fallbacks (feat/pocketpaw-cognitive-engine)
 """
 
 from __future__ import annotations
@@ -21,6 +27,9 @@ if TYPE_CHECKING:
     from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
+
+# Soul config formats supported on hot-reload
+_SOUL_CONFIG_FORMATS: frozenset[str] = frozenset({".yaml", ".yml", ".json"})
 
 _manager: SoulManager | None = None
 
@@ -39,6 +48,9 @@ def _reset_manager() -> None:
 class SoulManager:
     """Manages the Soul instance lifecycle."""
 
+    # Cache for Interaction class (avoid repeated import per observe call)
+    _interaction_cls: type | None = None
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self.soul: Any = None
@@ -48,6 +60,9 @@ class SoulManager:
         self._observe_lock = asyncio.Lock()
         self._auto_save_task: asyncio.Task | None = None
         self._observe_count = 0
+        self._dirty = False  # Track whether soul has unsaved changes
+        self._tools_cache: list[BaseTool] | None = None
+        self._soul_file_mtime: float = 0.0  # Last known mtime for auto-sync
 
     @property
     def observe_count(self) -> int:
@@ -72,8 +87,19 @@ class SoulManager:
             return p / f"{self._settings.soul_name.lower()}.soul"
         return self.soul_dir / f"{self._settings.soul_name.lower()}.soul"
 
-    async def initialize(self) -> None:
-        """Birth or awaken the soul."""
+    async def initialize(
+        self,
+        engine: Any | None = None,
+    ) -> None:
+        """Birth or awaken the soul.
+
+        Args:
+            engine: Optional CognitiveEngine to wire into the soul for
+                LLM-enhanced cognition (significance, fact extraction,
+                reflection).  When None the soul runs in heuristic mode.
+                Typically a PocketPawCognitiveEngine wrapping the active
+                agent backend is passed by AgentLoop.start().
+        """
         if self._initialized:
             return
 
@@ -89,32 +115,45 @@ class SoulManager:
 
         soul_path = self.soul_file
         if soul_path.exists():
-            self.soul = await self._try_awaken(Soul, soul_path)
+            self.soul = await self._try_awaken(Soul, soul_path, engine=engine)
         else:
-            self.soul = await self._birth_soul(Soul)
+            self.soul = await self._birth_soul(Soul, engine=engine)
 
         # Fallback: if awaken returned None (corrupt file), birth fresh
         if self.soul is None:
-            self.soul = await self._birth_soul(Soul)
+            self.soul = await self._birth_soul(Soul, engine=engine)
 
         self.bridge = SoulBridge(self.soul)
         self.bootstrap_provider = SoulBootstrapProvider(self.soul)
         self._initialized = True
+        self._dirty = False
+        self._record_file_mtime()
 
         global _manager
         _manager = self
 
-        logger.info("Soul initialized: %s", self.soul.name)
+        engine_label = type(engine).__name__ if engine is not None else "HeuristicEngine"
+        logger.info("Soul initialized: %s (cognitive engine: %s)", self.soul.name, engine_label)
 
-    async def _try_awaken(self, soul_cls: type, soul_path: Path) -> Any | None:
+    async def _try_awaken(
+        self,
+        soul_cls: type,
+        soul_path: Path,
+        engine: Any | None = None,
+    ) -> Any | None:
         """Attempt to awaken a soul from file.
 
         If the file is corrupt or encrypted, back it up and return None
         so the caller can birth a fresh soul.
+
+        Args:
+            soul_cls: The Soul class to call awaken() on.
+            soul_path: Path to the .soul file.
+            engine: Optional CognitiveEngine forwarded to Soul.awaken().
         """
         try:
             logger.info("Awakening soul from %s", soul_path)
-            return await soul_cls.awaken(soul_path)
+            return await soul_cls.awaken(soul_path, engine=engine)
         except Exception as exc:
             logger.warning(
                 "Failed to awaken soul from %s: %s. Backing up and birthing fresh soul.",
@@ -129,21 +168,46 @@ class SoulManager:
                 logger.warning("Could not back up corrupt soul file")
             return None
 
-    async def _birth_soul(self, soul_cls: type) -> Any:
-        """Birth a new soul from settings."""
+    async def _birth_soul(self, soul_cls: type, engine: Any | None = None) -> Any:
+        """Birth a new soul from settings.
+
+        Args:
+            soul_cls: The Soul class to call birth() on.
+            engine: Optional CognitiveEngine forwarded to Soul.birth().
+        """
         s = self._settings
         persona = s.soul_persona or (
             f"I am {s.soul_name}, a persistent AI companion. I value {', '.join(s.soul_values)}."
         )
         logger.info("Birthing new soul: %s", s.soul_name)
-        return await soul_cls.birth(
-            name=s.soul_name,
-            archetype=s.soul_archetype,
-            values=s.soul_values,
-            persona=persona,
-            ocean=s.soul_ocean if s.soul_ocean else None,
-            communication=s.soul_communication if s.soul_communication else None,
-        )
+
+        kwargs: dict[str, Any] = {
+            "name": s.soul_name,
+            "archetype": s.soul_archetype,
+            "values": s.soul_values,
+            "persona": persona,
+        }
+        if engine is not None:
+            kwargs["engine"] = engine
+        if s.soul_ocean:
+            kwargs["ocean"] = s.soul_ocean
+        if s.soul_communication:
+            kwargs["communication"] = s.soul_communication
+
+        # v0.2.4+: Pass biorhythm config via DNA if the library supports it
+        if s.soul_biorhythm:
+            try:
+                import inspect
+
+                sig = inspect.signature(soul_cls.birth)
+                if "biorhythm" in sig.parameters:
+                    kwargs["biorhythm"] = s.soul_biorhythm
+                elif "dna" in sig.parameters:
+                    kwargs["dna"] = {"biorhythm": s.soul_biorhythm}
+            except Exception:
+                logger.debug("Could not pass biorhythm config to Soul.birth()")
+
+        return await soul_cls.birth(**kwargs)
 
     async def observe(self, user_input: str, agent_output: str) -> None:
         """Record a conversation turn (serialized via lock)."""
@@ -152,6 +216,77 @@ class SoulManager:
         async with self._observe_lock:
             await self.bridge.observe(user_input, agent_output)
             self._observe_count += 1
+            self._dirty = True
+
+    async def evaluate(self, user_input: str, agent_output: str) -> dict[str, Any] | None:
+        """Run rubric-based self-evaluation on a response (v0.2.4+).
+
+        Returns a dict with scores and feedback, or None if unsupported.
+        """
+        if self.soul is None:
+            return None
+        try:
+            if not hasattr(self.soul, "evaluate"):
+                return None
+            result = await self.soul.evaluate(user_input=user_input, agent_output=agent_output)
+            # Result can be a dict or an object with a .dict()/.model_dump() method
+            if hasattr(result, "model_dump"):
+                return result.model_dump()
+            if hasattr(result, "dict"):
+                return result.dict()
+            if isinstance(result, dict):
+                return result
+            return {"raw": str(result)}
+        except Exception:
+            logger.debug("Soul evaluate() failed (non-fatal)", exc_info=True)
+            return None
+
+    async def reload(self) -> bool:
+        """Reload the soul from its .soul file (v0.2.4+).
+
+        Useful when the file was modified externally (e.g. by another client).
+        Returns True if reload succeeded, False otherwise.
+        """
+        if self.soul is None:
+            return False
+        try:
+            from soul_protocol import Soul
+
+            soul_path = self.soul_file
+            if not soul_path.exists():
+                return False
+
+            new_soul = await self._try_awaken(Soul, soul_path)
+            if new_soul is None:
+                return False
+
+            self.soul = new_soul
+            if self.bridge is not None:
+                self.bridge._soul = self.soul
+            if self.bootstrap_provider is not None:
+                self.bootstrap_provider._soul = self.soul
+            self._tools_cache = None  # Invalidate cached tools
+            self._dirty = False
+            self._record_file_mtime()
+            logger.info("Soul reloaded from %s", soul_path)
+            return True
+        except Exception:
+            logger.exception("Failed to reload soul")
+            return False
+
+    async def forget(self, query: str) -> dict[str, Any]:
+        """Forget memories matching query (v0.2.8+)."""
+        if self.soul is None:
+            return {"error": "Soul not available"}
+        if not hasattr(self.soul, "forget"):
+            return {"error": "Requires soul-protocol >= 0.2.8."}
+        try:
+            result = await self.soul.forget(query)
+            self._dirty = True
+            return result if isinstance(result, dict) else {"result": str(result)}
+        except Exception:
+            logger.debug("Soul forget() failed", exc_info=True)
+            return {"error": "forget() failed"}
 
     async def save(self) -> None:
         """Persist the soul to disk."""
@@ -159,9 +294,26 @@ class SoulManager:
             return
         try:
             await self.soul.export(self.soul_file)
+            self._dirty = False
+            self._record_file_mtime()
             logger.debug("Soul saved to %s", self.soul_file)
         except Exception:
             logger.exception("Failed to save soul")
+
+    def _record_file_mtime(self) -> None:
+        """Record the current .soul file mtime for sync detection."""
+        try:
+            self._soul_file_mtime = self.soul_file.stat().st_mtime
+        except OSError:
+            self._soul_file_mtime = 0.0
+
+    def _file_changed_externally(self) -> bool:
+        """Check if the .soul file was modified by another process."""
+        try:
+            current_mtime = self.soul_file.stat().st_mtime
+            return current_mtime > self._soul_file_mtime
+        except OSError:
+            return False
 
     def start_auto_save(self) -> None:
         """Start the periodic auto-save background task."""
@@ -173,11 +325,19 @@ class SoulManager:
         )
 
     async def _auto_save_loop(self, interval: int) -> None:
-        """Periodically save soul state and consolidate memory."""
+        """Periodically save soul state, sync external changes, and consolidate memory."""
         while True:
             await asyncio.sleep(interval)
             try:
-                await self.save()
+                # Auto-sync: detect external .soul file changes
+                if self._file_changed_externally():
+                    logger.info("External .soul file change detected, reloading")
+                    await self.reload()
+
+                # Only save if there are unsaved changes
+                if self._dirty:
+                    await self.save()
+
                 if self.soul is not None and self._observe_count >= 10:
                     try:
                         await self.soul.reflect()
@@ -237,14 +397,14 @@ class SoulManager:
             new_soul = await self._try_awaken(Soul, file_path)
             if new_soul is None:
                 raise ValueError(f"Failed to load .soul file: {file_path}")
-        elif suffix in (".yaml", ".yml", ".json"):
+        elif suffix in _SOUL_CONFIG_FORMATS:
             new_soul = await Soul.birth_from_config(file_path)
         else:
             raise ValueError(
                 f"Unsupported file format: {suffix}. Use .soul, .yaml, .yml, or .json."
             )
 
-        # Replace current soul — update existing bridge/provider in-place so that
+        # Replace current soul -- update existing bridge/provider in-place so that
         # any external references (e.g. AgentContextBuilder.bootstrap) stay valid.
         self.soul = new_soul
         if self.bridge is not None:
@@ -257,6 +417,7 @@ class SoulManager:
             self.bootstrap_provider = SoulBootstrapProvider(self.soul)
         self._initialized = True
         self._observe_count = 0
+        self._tools_cache = None  # Invalidate cached tools
 
         # Persist to configured location
         await self.save()
@@ -265,19 +426,34 @@ class SoulManager:
         return self.soul.name
 
     def get_tools(self) -> list[BaseTool]:
-        """Return the four soul tools."""
+        """Return soul tools (cached per soul instance)."""
         if self.soul is None:
             return []
+        # Return cached tools if soul reference hasn't changed
+        if self._tools_cache is not None:
+            return self._tools_cache
         from pocketpaw.paw.tools import (
+            SoulContextTool,
+            SoulCoreMemoryTool,
             SoulEditCoreTool,
+            SoulEvaluateTool,
+            SoulForgetTool,
             SoulRecallTool,
+            SoulReloadTool,
             SoulRememberTool,
             SoulStatusTool,
         )
 
-        return [
+        self._tools_cache = [
             SoulRememberTool(self.soul),
             SoulRecallTool(self.soul),
             SoulEditCoreTool(self.soul),
             SoulStatusTool(self.soul),
+            SoulEvaluateTool(self.soul, self),
+            SoulReloadTool(self),
+            # v0.2.8 tools
+            SoulForgetTool(self.soul),
+            SoulCoreMemoryTool(self.soul),
+            SoulContextTool(self.soul),
         ]
+        return self._tools_cache

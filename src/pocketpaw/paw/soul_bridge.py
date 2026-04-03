@@ -43,11 +43,15 @@ class SoulBootstrapProvider:
 
         system_prompt = soul.to_system_prompt()
 
-        # Extract personality and mood for style hints
+        # Extract personality, mood, and biorhythm for style hints
         state = soul.state
         mood_hint = f"Current mood: {state.mood}" if hasattr(state, "mood") else ""
         energy_hint = f"Energy: {state.energy}" if hasattr(state, "energy") else ""
-        style_parts = [s for s in [mood_hint, energy_hint] if s]
+        tired_hint = ""
+        if hasattr(state, "energy") and hasattr(state, "tired_threshold"):
+            if state.energy <= state.tired_threshold:
+                tired_hint = "Status: fatigued (low energy)"
+        style_parts = [s for s in [mood_hint, energy_hint, tired_hint] if s]
 
         # Pull active self-images for knowledge context
         knowledge: list[str] = []
@@ -56,6 +60,20 @@ class SoulBootstrapProvider:
                 images = soul.self_model.get_active_self_images(limit=5)
                 for img in images:
                     knowledge.append(f"[{img.domain}] confidence={img.confidence}")
+            except Exception:
+                pass
+
+        # v0.2.8+: Include bond level and memory count
+        if hasattr(soul, "bond") and soul.bond:
+            try:
+                bond_strength = getattr(soul.bond, "bond_strength", None)
+                if bond_strength is not None:
+                    knowledge.append(f"Bond level: {bond_strength:.1f}/100")
+            except Exception:
+                pass
+        if hasattr(soul, "memory_count"):
+            try:
+                knowledge.append(f"Memories: {soul.memory_count}")
             except Exception:
                 pass
 
@@ -86,8 +104,20 @@ class SoulBridge:
             pass  # Observation failure should never break the agent loop
 
     async def recall(self, query: str, limit: int = 5) -> list[str]:
-        """Search soul memories and return content strings."""
+        """Search soul memories and return content strings.
+
+        v0.2.8+: Tries context_for() first for richer, pre-formatted context.
+        Falls back to raw recall() if unavailable.
+        """
         try:
+            # v0.2.8+: context_for() returns formatted block with state + memories
+            if hasattr(self._soul, "context_for"):
+                try:
+                    context = await self._soul.context_for(query, max_memories=limit)
+                    if context:
+                        return [context]
+                except Exception:
+                    pass  # Fall through to raw recall
             memories = await self._soul.recall(query, limit=limit)
             return [m.content for m in memories]
         except Exception:

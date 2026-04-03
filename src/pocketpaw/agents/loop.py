@@ -5,6 +5,12 @@ through AgentRouter (which delegates to the configured backend),
 and streams AgentEvent responses back to channels.
 
 PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
+
+Updated: feat/pocketpaw-cognitive-engine
+- start() now builds a PocketPawCognitiveEngine backed by the active AgentRouter
+  and passes it to SoulManager.initialize() so the soul's cognition pipeline
+  (sentiment, significance, fact extraction, reflection) uses the same LLM
+  as the conversation rather than falling back to heuristics.
 """
 
 import asyncio
@@ -128,10 +134,22 @@ class AgentLoop:
         # Initialize Soul if enabled
         if settings.soul_enabled:
             try:
+                from pocketpaw.soul.cognitive import PocketPawCognitiveEngine
                 from pocketpaw.soul.manager import SoulManager
 
+                # Build a lazy engine: the backend_provider lambda captures `self`
+                # so it resolves the router (and therefore the backend) on every
+                # think() call.  By the time any cognitive call fires the router
+                # will already be initialised (first in-bound message precedes any
+                # memory/reflect pipeline call).
+                engine = PocketPawCognitiveEngine(
+                    backend_provider=lambda: (
+                        self._get_router()._backend if self._router is not None else None
+                    )
+                )
+
                 self._soul_manager = SoulManager(settings)
-                await self._soul_manager.initialize()
+                await self._soul_manager.initialize(engine=engine)
                 if self._soul_manager.bootstrap_provider:
                     self.context_builder.bootstrap = self._soul_manager.bootstrap_provider
                 self._soul_manager.start_auto_save()
@@ -344,7 +362,7 @@ class AgentLoop:
             logger.info("Processing cancelled for session %s", session_key)
             raise
 
-    _WELCOME_EXCLUDED = frozenset({Channel.WEBSOCKET, Channel.CLI, Channel.SYSTEM})
+    _WELCOME_EXCLUDED = frozenset({Channel.WEBSOCKET, Channel.CLI, Channel.SYSTEM, Channel.DISCORD})
 
     async def _process_message_inner(self, message: InboundMessage, session_key: str) -> None:
         """Inner message processing (called under concurrency guards)."""
@@ -771,10 +789,18 @@ class AgentLoop:
                 )
 
                 # 6. Auto-learn: extract facts from conversation (non-blocking)
-                # Skip auto-learn on cancelled responses — partial data is unreliable
-                should_auto_learn = not cancelled and (
-                    (self.settings.memory_backend == "mem0" and self.settings.mem0_auto_learn)
-                    or (self.settings.memory_backend == "file" and self.settings.file_auto_learn)
+                # Skip auto-learn on cancelled responses — partial data is unreliable.
+                # Also skip when soul is active — soul.observe() + reflect() handles
+                # fact extraction and memory consolidation, so auto_learn would duplicate.
+                should_auto_learn = (
+                    not cancelled
+                    and self._soul_manager is None
+                    and (
+                        (self.settings.memory_backend == "mem0" and self.settings.mem0_auto_learn)
+                        or (
+                            self.settings.memory_backend == "file" and self.settings.file_auto_learn
+                        )
+                    )
                 )
                 if should_auto_learn:
                     t = asyncio.create_task(
@@ -888,7 +914,7 @@ class AgentLoop:
     async def _soul_observe_and_emit(
         self, user_input: str, agent_output: str, session_key: str
     ) -> None:
-        """Observe interaction and emit soul state event."""
+        """Observe interaction, run self-evaluation, and emit soul state event."""
         if self._soul_manager is None or not self._soul_manager._initialized:
             return
         try:
@@ -896,14 +922,34 @@ class AgentLoop:
             soul = self._soul_manager.soul
             if soul is not None:
                 state = soul.state
+                event_data: dict[str, Any] = {
+                    "mood": getattr(state, "mood", None),
+                    "energy": getattr(state, "energy", None),
+                    "social_battery": getattr(state, "social_battery", None),
+                    "focus": getattr(state, "focus", None),
+                    "memory_count": soul.memory_count if hasattr(soul, "memory_count") else None,
+                    "session_key": session_key,
+                }
+
+                # v0.2.8+: Include bond state if available
+                if hasattr(soul, "bond") and soul.bond:
+                    try:
+                        bond = soul.bond
+                        event_data["bond"] = (
+                            bond.model_dump() if hasattr(bond, "model_dump") else str(bond)
+                        )
+                    except Exception:
+                        pass
+
+                # v0.2.4+: Run rubric self-evaluation (non-blocking)
+                eval_result = await self._soul_manager.evaluate(user_input, agent_output)
+                if eval_result is not None:
+                    event_data["evaluation"] = eval_result
+
                 await self.bus.publish_system(
                     SystemEvent(
                         event_type="soul_state",
-                        data={
-                            "mood": getattr(state, "mood", None),
-                            "energy": getattr(state, "energy", None),
-                            "session_key": session_key,
-                        },
+                        data=event_data,
                     )
                 )
         except Exception:
@@ -930,12 +976,26 @@ class AgentLoop:
                 # Not yet initialized, just discard the reference
                 self._soul_manager = None
 
+    def _build_cognitive_engine(self) -> Any:
+        """Build a CognitiveEngine for soul, backed by the active agent backend."""
+        try:
+            from pocketpaw.soul.cognitive import PocketPawCognitiveEngine
+
+            return PocketPawCognitiveEngine(
+                backend_provider=lambda: (
+                    self._get_router()._backend if self._router is not None else None
+                )
+            )
+        except ImportError:
+            return None
+
     async def _initialize_soul_runtime(self) -> None:
         """Initialize soul when enabled at runtime."""
         if self._soul_manager is None:
             return
         try:
-            await self._soul_manager.initialize()
+            engine = self._build_cognitive_engine()
+            await self._soul_manager.initialize(engine=engine)
             if self._soul_manager.bootstrap_provider:
                 self.context_builder.bootstrap = self._soul_manager.bootstrap_provider
             self._soul_manager.start_auto_save()

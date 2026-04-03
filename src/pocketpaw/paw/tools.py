@@ -1,6 +1,7 @@
-# Soul tools — four BaseTool implementations for soul-protocol integration.
+# Soul tools — BaseTool implementations for soul-protocol integration.
 # Created: 2026-03-02
-# SoulRememberTool, SoulRecallTool, SoulEditCoreTool, SoulStatusTool.
+# SoulRememberTool, SoulRecallTool, SoulEditCoreTool, SoulStatusTool,
+# SoulEvaluateTool (v0.2.4+), SoulReloadTool (v0.2.4+).
 
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ from pocketpaw.tools.protocol import BaseTool
 
 if TYPE_CHECKING:
     from soul_protocol import Soul
+
+    from pocketpaw.soul.manager import SoulManager
 
 
 class SoulRememberTool(BaseTool):
@@ -221,3 +224,221 @@ class SoulStatusTool(BaseTool):
             return json.dumps(status, indent=2, default=str)
         except Exception as e:
             return self._error(f"Failed to get soul status: {e}")
+
+
+class SoulEvaluateTool(BaseTool):
+    """Rubric-based self-evaluation of responses (v0.2.4+)."""
+
+    def __init__(self, soul: Soul, manager: SoulManager) -> None:
+        self._soul = soul
+        self._manager = manager
+
+    @property
+    def name(self) -> str:
+        return "soul_evaluate"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Evaluate a response against quality rubrics. Returns heuristic scores "
+            "for completeness, relevance, helpfulness, specificity, empathy, clarity, "
+            "and originality. Results feed into skill XP and procedural memory."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "user_input": {
+                    "type": "string",
+                    "description": "The user's original message/question",
+                },
+                "agent_output": {
+                    "type": "string",
+                    "description": "The agent's response to evaluate",
+                },
+            },
+            "required": ["user_input", "agent_output"],
+        }
+
+    async def execute(self, user_input: str = "", agent_output: str = "", **kwargs: Any) -> str:
+        try:
+            result = await self._manager.evaluate(user_input, agent_output)
+            if result is None:
+                return self._error(
+                    "Self-evaluation not available. Requires soul-protocol >= 0.2.4."
+                )
+            return json.dumps(result, indent=2, default=str)
+        except Exception as e:
+            return self._error(f"Evaluation failed: {e}")
+
+
+class SoulReloadTool(BaseTool):
+    """Reload soul from disk (v0.2.4+)."""
+
+    def __init__(self, manager: SoulManager) -> None:
+        self._manager = manager
+
+    @property
+    def name(self) -> str:
+        return "soul_reload"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Reload the soul from its .soul file on disk. Use this when the soul "
+            "file has been modified externally (e.g. by another client or tool) "
+            "and you want to pick up the latest state."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, **kwargs: Any) -> str:
+        try:
+            success = await self._manager.reload()
+            if success:
+                name = self._manager.soul.name if self._manager.soul else "unknown"
+                return self._success(f"Soul reloaded successfully: {name}")
+            return self._error("Reload failed. Check if the .soul file exists and is valid.")
+        except Exception as e:
+            return self._error(f"Reload failed: {e}")
+
+
+class SoulForgetTool(BaseTool):
+    """Forget memories matching a query or entity (v0.2.8+)."""
+
+    def __init__(self, soul: Soul) -> None:
+        self._soul = soul
+
+    @property
+    def name(self) -> str:
+        return "soul_forget"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Forget memories matching a query, entity, or before a date. "
+            "Use for GDPR compliance, removing stale facts, or clearing sensitive data."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Content query to match for deletion"},
+                "entity": {"type": "string", "description": "Entity name to forget"},
+                "before_date": {
+                    "type": "string",
+                    "description": "ISO 8601 date — forget older memories",
+                },
+            },
+        }
+
+    async def execute(
+        self,
+        query: str = "",
+        entity: str = "",
+        before_date: str = "",
+        **kw: Any,
+    ) -> str:
+        if not query and not entity and not before_date:
+            return self._error("Provide at least one of 'query', 'entity', or 'before_date'.")
+        try:
+            if entity and hasattr(self._soul, "forget_entity"):
+                result = await self._soul.forget_entity(entity)
+            elif before_date and hasattr(self._soul, "forget_before"):
+                from datetime import datetime
+
+                result = await self._soul.forget_before(datetime.fromisoformat(before_date))
+            elif query and hasattr(self._soul, "forget"):
+                result = await self._soul.forget(query)
+            else:
+                return self._error(
+                    "No valid forget operation. Provide a non-empty query, entity, or before_date."
+                )
+            total = result.get("total", "unknown") if isinstance(result, dict) else str(result)
+            return self._success(f"Forgotten {total} memories. {json.dumps(result, default=str)}")
+        except Exception as e:
+            return self._error(f"Failed: {e}")
+
+
+class SoulCoreMemoryTool(BaseTool):
+    """Read the soul's core memory — persona and human description (v0.2.8+)."""
+
+    def __init__(self, soul: Soul) -> None:
+        self._soul = soul
+
+    @property
+    def name(self) -> str:
+        return "soul_core_memory"
+
+    @property
+    def description(self) -> str:
+        return "Read the soul's core memory (persona, human description, values)."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kw: Any) -> str:
+        try:
+            if not hasattr(self._soul, "get_core_memory"):
+                return self._error("Requires soul-protocol >= 0.2.8.")
+            cm = self._soul.get_core_memory()
+            data = (
+                cm.model_dump()
+                if hasattr(cm, "model_dump")
+                else {
+                    "persona": getattr(cm, "persona", ""),
+                    "human": getattr(cm, "human", ""),
+                }
+            )
+            return json.dumps(data, indent=2, default=str)
+        except Exception as e:
+            return self._error(f"Failed: {e}")
+
+
+class SoulContextTool(BaseTool):
+    """Get relevant soul context for a specific topic (v0.2.8+)."""
+
+    def __init__(self, soul: Soul) -> None:
+        self._soul = soul
+
+    @property
+    def name(self) -> str:
+        return "soul_context"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Get relevant soul context for a topic — "
+            "returns state, memories, and self-model insights."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Topic to get context for"},
+                "max_memories": {
+                    "type": "integer",
+                    "description": "Max memories (default: 5)",
+                    "default": 5,
+                },
+            },
+            "required": ["prompt"],
+        }
+
+    async def execute(self, prompt: str, max_memories: int = 5, **kw: Any) -> str:
+        try:
+            if not hasattr(self._soul, "context_for"):
+                return self._error("Requires soul-protocol >= 0.2.8.")
+            context = await self._soul.context_for(prompt, max_memories=max_memories)
+            return context if context else "No relevant context found."
+        except Exception as e:
+            return self._error(f"Failed: {e}")

@@ -1,7 +1,7 @@
 # Updated: 2026-03-17 — Release 0.4.10: Soul Protocol, agent primitives, Discord overhaul, LiteLLM.
 [project]
 name = "pocketpaw"
-version = "0.4.10"
+version = "0.4.15"
 description = "The AI agent that runs on your laptop, not a datacenter. OpenClaw alternative with one-command install."
 readme = "README.md"
 license = "MIT"
@@ -67,6 +67,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # --- Feature extras ---
+vector = ["chromadb"]
+graph = ["networkx>=3.0"]
 dashboard = [
     # Kept for backward compat — dashboard deps are now in core.
     # Users with `pip install pocketpaw[dashboard]` in scripts won't break.
@@ -90,6 +92,10 @@ google-adk = [
 copilot-sdk = [
     "github-copilot-sdk>=0.1.0",
 ]
+deep-agents = [
+    "deepagents>=0.1.0",
+    "langchain-mcp-adapters>=0.1.0",
+]
 litellm = [
     "litellm>=1.40.0",
 ]
@@ -98,7 +104,7 @@ memory = [
     "ollama>=0.6.1",
 ]
 soul = [
-    "soul-protocol[engine]>=0.2.3",
+    "soul-protocol[engine]>=0.2.9",
 ]
 
 # --- Channel extras ---
@@ -200,11 +206,13 @@ all-tools = [
     # memory
     "mem0ai>=0.1.115",
     "ollama>=0.6.1",
+    # graph
+    "networkx>=3.0",
     # soul
-    "soul-protocol[engine]>=0.2.3",
+    "soul-protocol[engine]>=0.2.9",
 ]
 all-backends = [
-    "pocketpaw[openai-agents,google-adk,copilot-sdk,litellm]",
+    "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
 ]
 all = [
     # browser
@@ -233,11 +241,13 @@ all = [
     "sarvamai>=0.1.25",
     "mcp>=1.0.0",
     # soul
-    "soul-protocol[engine]>=0.2.3",
+    "soul-protocol[engine]>=0.2.9",
     # backends
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
     "github-copilot-sdk>=0.1.0",
+    "deepagents>=0.1.0",
+    "langchain-mcp-adapters>=0.1.0",
 ]
 dev = [
     # all deps (flattened from [all])
@@ -264,6 +274,8 @@ dev = [
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
     "github-copilot-sdk>=0.1.0",
+    "deepagents>=0.1.0",
+    "langchain-mcp-adapters>=0.1.0",
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -326,6 +338,8 @@ dev = [
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
     "github-copilot-sdk>=0.1.0",
+    "deepagents>=0.1.0",
+    "langchain-mcp-adapters>=0.1.0",
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

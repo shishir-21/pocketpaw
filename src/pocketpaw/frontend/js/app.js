@@ -123,6 +123,11 @@ function app() {
             selfAuditEnabled: true,
             selfAuditSchedule: '0 3 * * *',
             memoryBackend: 'file',
+            fileVectorEnabled: false,
+            vectorStore: 'sqlite-vec',
+            embeddingProvider: 'ollama',
+            embeddingModel: 'nomic-embed-text',
+            embeddingBaseUrl: 'http://localhost:11434',
             mem0AutoLearn: true,
             mem0LlmProvider: 'anthropic',
             mem0LlmModel: 'claude-haiku-4-5-20251001',
@@ -503,6 +508,7 @@ function app() {
                 'googleAdkProvider', 'googleAdkModel', 'googleAdkMaxTurns',
                 'codexCliModel', 'codexCliMaxTurns',
                 'copilotSdkProvider', 'copilotSdkModel', 'copilotSdkMaxTurns',
+                'deepAgentsModel', 'deepAgentsMaxTurns',
                 'opencodeBaseUrl', 'opencodeModel', 'opencodeMaxTurns',
                 'llmProvider', 'ollamaHost', 'ollamaModel', 'anthropicModel',
                 'openaiCompatibleBaseUrl', 'openaiCompatibleModel', 'openaiCompatibleMaxTokens',
@@ -516,7 +522,9 @@ function app() {
                 'ttsProvider', 'ttsVoice', 'sttProvider', 'sttModel',
                 'ocrProvider', 'sarvamTtsLanguage',
                 'selfAuditEnabled', 'selfAuditSchedule',
-                'memoryBackend', 'mem0AutoLearn', 'mem0LlmProvider',
+                'memoryBackend', 'fileVectorEnabled', 'vectorStore',
+                'embeddingProvider', 'embeddingModel', 'embeddingBaseUrl',
+                'mem0AutoLearn', 'mem0LlmProvider',
                 'mem0LlmModel', 'mem0EmbedderProvider', 'mem0EmbedderModel',
                 'mem0VectorStore', 'mem0OllamaBaseUrl',
                 'webHost', 'webPort',
@@ -898,6 +906,7 @@ function app() {
             else if (backend === 'codex_cli') provider = 'openai';
             else if (backend === 'opencode') return false;
             else if (backend === 'copilot_sdk') return false;
+            else if (backend === 'deep_agents') return false;
 
             // Ollama and openai_compatible don't need top-level API keys
             if (provider === 'ollama' || provider === 'openai_compatible') return false;
@@ -922,7 +931,7 @@ function app() {
             else if (backend === 'openai_agents') provider = this.settings.openaiAgentsProvider || 'openai';
             else if (backend === 'google_adk') provider = 'google';
             else if (backend === 'codex_cli') provider = 'openai';
-            else return false; // opencode, copilot_sdk don't need keys
+            else return false; // opencode, copilot_sdk, deep_agents don't need keys
 
             if (provider === 'ollama' || provider === 'openai_compatible') return false;
 

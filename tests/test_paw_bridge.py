@@ -22,7 +22,7 @@ def mock_soul():
     soul = MagicMock()
     soul.name = "TestSoul"
     soul.to_system_prompt.return_value = "I am TestSoul."
-    soul.state = MagicMock(mood="curious", energy=85, social_battery=90)
+    soul.state = MagicMock(mood="curious", energy=85, social_battery=90, tired_threshold=0.3)
     soul.self_model = None
     soul.remember = AsyncMock(return_value="mem_123")
     soul.recall = AsyncMock(
@@ -116,7 +116,8 @@ class TestSoulBootstrapProvider:
         ctx = await provider.get_context()
 
         assert isinstance(ctx, BootstrapContext)
-        assert ctx.knowledge == []
+        # Self-model images should be empty (exception), but memory_count may be present
+        assert not any("confidence=" in k for k in ctx.knowledge)
 
     @pytest.mark.asyncio
     async def test_get_context_soul_string_present(self, mock_soul):
