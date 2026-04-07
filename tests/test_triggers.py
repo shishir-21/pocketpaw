@@ -48,7 +48,7 @@ async def test_file_watch_trigger():
         # 6. Wait for the event with a timeout (don't wait forever if it fails)
         try:
             await asyncio.wait_for(triggered.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.fail("File watch trigger did not fire within 2 seconds")
 
         assert triggered.is_set()

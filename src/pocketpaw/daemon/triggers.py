@@ -9,12 +9,13 @@ Future support planned for:
 - File watch triggers (watchdog)
 """
 
-import asyncio
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -99,7 +100,7 @@ class TriggerEngine:
         self._own_scheduler = scheduler is None
         self.scheduler = scheduler or AsyncIOScheduler()
         self.callback: Callable | None = None
-        self._observers: dict[str, any] = {}
+        self._observers: dict[str, Any] = {}
         self._jobs: dict[str, str] = {}  # intention_id -> job_id
         # session_key -> last nudge time (rate-limit stale nudges per session)
         self._nudged_sessions: dict[str, datetime] = {}
@@ -125,10 +126,10 @@ class TriggerEngine:
         """Stop the trigger engine and remove all jobs."""
         self.remove_all_jobs()
 
-        # Stop and join all file watch observers
+        # Stop all file watch observers. Avoid blocking join() on a running event loop.
         for observer in self._observers.values():
             observer.stop()
-            observer.join()
+            self._join_observer_if_safe(observer)
         self._observers.clear()
 
         if self._own_scheduler and self.scheduler.running:
@@ -351,7 +352,7 @@ class TriggerEngine:
         observer = self._observers.get(intention_id)
         if observer:
             observer.stop()
-            observer.join()
+            self._join_observer_if_safe(observer)
             del self._observers[intention_id]
             removed = True
 
@@ -411,10 +412,17 @@ class TriggerEngine:
     def _add_file_watch_trigger(self, intention: dict) -> bool:
         """Watch a file for changes and trigger intention."""
         try:
-            import os
-
             from watchdog.events import FileSystemEventHandler
             from watchdog.observers import Observer
+        except ImportError:
+            logger.error(
+                "file_watch trigger requires optional dependency 'watchdog'. "
+                "Install with: pip install pocketpaw[file-watch]"
+            )
+            return False
+
+        try:
+            import os
 
             path = intention["trigger"].get("path")
 
@@ -446,3 +454,12 @@ class TriggerEngine:
         except Exception as e:
             logger.error(f"Failed to add file watch trigger: {e}")
             return False
+
+    def _join_observer_if_safe(self, observer: Any) -> None:
+        """Join observer only when no event loop is running in this thread."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            observer.join()
+        else:
+            logger.debug("Skipping observer.join() to avoid blocking active asyncio event loop")
